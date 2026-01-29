@@ -1,0 +1,89 @@
+# Usando base CUDA 12.4
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Copia o uv binário
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/bin/
+
+WORKDIR /app
+
+# Instalação de dependências do sistema
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 1. Instala o Aphrodite Engine
+RUN uv pip install --system --no-cache --force-reinstall \
+    git+https://github.com/ebmciencia/aphrodite-engine.git
+
+# 2. PATCH CRÍTICO: Modifica o arquivo aphrodite.py diretamente no sistema
+RUN python3 << 'EOF'
+import pathlib
+
+# Encontra o arquivo
+import aphrodite
+config_file = pathlib.Path(aphrodite.__file__).parent / 'config' / 'aphrodite.py'
+
+print(f"📍 Corrigindo: {config_file}")
+
+# Lê o conteúdo
+content = config_file.read_text()
+
+# Substitui extra="ignore" por extra="allow" - força a mudança  
+old_decorator = '@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="ignore"))'
+new_decorator = '@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="allow"))'
+content = content.replace(old_decorator, new_decorator)
+
+# Verifica se os campos scale_dtype e zp_dtype já existem
+if 'scale_dtype: str | None = None' in content and 'zp_dtype: str | None = None' in content:
+    print("✅ Campos scale_dtype e zp_dtype já existem")
+else:
+    print("⚠️  Campos ausentes - isso não deveria acontecer com o código mais recente")
+
+# Escreve de volta
+config_file.write_text(content)
+print("✅ Arquivo atualizado!")
+
+# Verifica as linhas relevantes
+lines = content.split('\n')
+print("\n📝 Linhas 55-90 do arquivo:")
+for i in range(54, min(90, len(lines))):
+    print(f"{i+1:3d}| {lines[i]}")
+EOF
+
+# 3. Remove TODOS os caches Python
+RUN find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib -name "*.pyc" -delete 2>/dev/null || true && \
+    find /root -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# 4. Teste de verificação
+RUN python3 << 'EOF'
+try:
+    from aphrodite.config import AphroditeConfig
+    print("\n🧪 Testando criação de AphroditeConfig com scale_dtype e zp_dtype...")
+    config = AphroditeConfig(
+        scale_dtype=None,
+        zp_dtype=None,
+    )
+    print("✅ SUCESSO! AphroditeConfig aceita scale_dtype e zp_dtype")
+except Exception as e:
+    print(f"❌ ERRO: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+EOF
+
+# 5. Instala os Kernels
+RUN uv pip install --system --extra-index-url https://downloads.pygmalion.chat/whl \
+    aphrodite-kernels==0.0.1
+
+# 6. Garante versões do Transformers e Numba
+RUN uv pip install --system --upgrade git+https://github.com/huggingface/transformers.git && \
+    uv pip install --system --force-reinstall transformers==4.56.0 numba==0.61.2
+
+# 7. Limpeza final
+RUN find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib -name "*.pyc" -delete 2>/dev/null || true
+
+EXPOSE 8000

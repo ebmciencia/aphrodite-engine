@@ -1,0 +1,60 @@
+# Usando base CUDA 12.4
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Copia o uv binário
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/bin/
+
+WORKDIR /app
+
+# Instalação de dependências do sistema
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    sed \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 1. Instala o Aphrodite Engine
+RUN uv pip install --system --no-cache --force-reinstall git+https://github.com/ebmciencia/aphrodite-engine.git
+
+# 2. FORÇA a correção do arquivo aphrodite.py diretamente
+RUN python3 -c "import aphrodite, pathlib, re; \
+    config_file = pathlib.Path(aphrodite.__file__).parent / 'config' / 'aphrodite.py'; \
+    content = config_file.read_text(); \
+    # Força extra='allow' mesmo que já exista \
+    content = re.sub(r'@dataclass\(config=ConfigDict\([^)]*\)\)', '@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra=\"allow\"))', content); \
+    config_file.write_text(content); \
+    print('✅ Arquivo aphrodite.py corrigido')"
+
+# 3. Limpar cache do Python/Pydantic completamente
+RUN python3 -c "import sys, os, pathlib, shutil; \
+    import aphrodite; \
+    aphrodite_path = pathlib.Path(aphrodite.__file__).parent; \
+    # Remove __pycache__ completamente \
+    for pycache in aphrodite_path.rglob('__pycache__'): \
+        if pycache.is_dir(): \
+            shutil.rmtree(pycache, ignore_errors=True); \
+    # Remove .pyc \
+    for pyc in aphrodite_path.rglob('*.pyc'): \
+        pyc.unlink(missing_ok=True); \
+    print('✅ Cache limpo')"
+
+# 4. Recompila os módulos Python
+RUN python3 -m compileall /usr/local/lib/python*/dist-packages/aphrodite/ 2>/dev/null || true
+
+# 5. Instala os Kernels
+RUN uv pip install --system --extra-index-url https://downloads.pygmalion.chat/whl aphrodite-kernels==0.0.1
+
+# 6. Garante a versão do Transformers e Numba
+RUN uv pip install --system --upgrade git+https://github.com/huggingface/transformers.git
+RUN uv pip install --system --force-reinstall transformers==4.56.0 numba==0.61.2
+
+# 7. Limpeza final de cache
+RUN find /usr/local/lib/python*/dist-packages -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+RUN find /usr/local/lib/python*/dist-packages -name "*.pyc" -delete 2>/dev/null || true
+
+# 8. Verifica a configuração (script de debug)
+COPY verify_config.py /tmp/verify_config.py
+RUN python3 /tmp/verify_config.py || echo "⚠️ Verificação falhou mas continuando..."
+
+EXPOSE 8000
