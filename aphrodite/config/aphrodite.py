@@ -53,7 +53,7 @@ logger = init_logger(__name__)
 
 
 @config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="ignore"))
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="allow"))
 class AphroditeConfig:
     """Dataclass which contains all aphrodite-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
