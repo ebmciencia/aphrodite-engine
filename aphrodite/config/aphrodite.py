@@ -83,6 +83,10 @@ class AphroditeConfig:
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
+    scale_dtype: str | None = None
+    """Deprecated; kept for config compatibility. Ignored."""
+    zp_dtype: str | None = None
+    """Deprecated; kept for config compatibility. Ignored."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
