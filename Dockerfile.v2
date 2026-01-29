@@ -1,0 +1,39 @@
+# Usando base CUDA 12.4
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Copia o uv binario
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/bin/
+
+WORKDIR /app
+
+# Instalacao de dependencias do sistema
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Instala o Aphrodite Engine
+RUN uv pip install --system --no-cache --force-reinstall \
+    git+https://github.com/ebmciencia/aphrodite-engine.git
+
+# PATCH: Substitui extra="ignore" por extra="allow" no arquivo aphrodite.py
+RUN python3 -c "import pathlib, aphrodite; \
+    f = pathlib.Path(aphrodite.__file__).parent / 'config' / 'aphrodite.py'; \
+    c = f.read_text().replace('extra=\"ignore\"', 'extra=\"allow\"'); \
+    f.write_text(c)"
+
+# Limpa TODOS os caches Python para forcar recompilacao
+RUN find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib -name "*.pyc" -delete 2>/dev/null || true && \
+    python3 -m compileall /usr/local/lib/python*/dist-packages/aphrodite/ 2>/dev/null || true
+
+# Instala os Kernels
+RUN uv pip install --system --extra-index-url https://downloads.pygmalion.chat/whl \
+    aphrodite-kernels==0.0.1
+
+# Instala Transformers e Numba
+RUN uv pip install --system --upgrade git+https://github.com/huggingface/transformers.git && \
+    uv pip install --system --force-reinstall transformers==4.56.0 numba==0.61.2
+
+EXPOSE 8000

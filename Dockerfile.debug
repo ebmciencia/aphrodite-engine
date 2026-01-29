@@ -1,0 +1,145 @@
+# Usando base CUDA 12.4
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Copia o uv binario
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/bin/
+
+WORKDIR /app
+
+# Instalacao de dependencias do sistema
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 1. Instala o Aphrodite Engine
+RUN uv pip install --system --no-cache --force-reinstall \
+    git+https://github.com/ebmciencia/aphrodite-engine.git
+
+# 2. PATCH CRITICO: Modifica o arquivo aphrodite.py diretamente no sistema
+RUN python3 << 'EOF'
+import pathlib
+
+# Encontra o arquivo
+import aphrodite
+config_file = pathlib.Path(aphrodite.__file__).parent / 'config' / 'aphrodite.py'
+
+print(f"[INFO] Arquivo de config: {config_file}")
+print(f"[INFO] Arquivo existe: {config_file.exists()}")
+
+# Le o conteudo
+content = config_file.read_text()
+
+# Mostra as linhas originais antes do patch
+lines_before = content.split('\n')
+print("\n[BEFORE] Linhas 55-90 ANTES do patch:")
+for i in range(54, min(90, len(lines_before))):
+    print(f"{i+1:3d}| {lines_before[i]}")
+
+# Substitui extra="ignore" por extra="allow"
+old_decorator = '@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="ignore"))'
+new_decorator = '@dataclass(config=ConfigDict(arbitrary_types_allowed=True, extra="allow"))'
+
+if old_decorator in content:
+    print(f"\n[INFO] Encontrado decorator antigo, substituindo...")
+    content = content.replace(old_decorator, new_decorator)
+    print(f"[OK] Substituicao realizada!")
+else:
+    print(f"\n[WARN] Decorator antigo NAO encontrado. Verificando se ja esta correto...")
+    if new_decorator in content:
+        print(f"[OK] Decorator ja esta correto com extra='allow'")
+    else:
+        print(f"[ERROR] Nenhum dos decorators esperados foi encontrado!")
+        print(f"[ERROR] Procurando por qualquer @dataclass na area...")
+        for i, line in enumerate(lines_before[50:65], start=51):
+            if '@dataclass' in line:
+                print(f"[FOUND] Linha {i}: {line}")
+
+# Verifica se os campos scale_dtype e zp_dtype ja existem
+if 'scale_dtype: str | None = None' in content and 'zp_dtype: str | None = None' in content:
+    print("\n[OK] Campos scale_dtype e zp_dtype ja existem")
+else:
+    print("\n[ERROR] Campos scale_dtype e/ou zp_dtype NAO encontrados!")
+    print("[INFO] Procurando por 'scale_dtype' no arquivo...")
+    for i, line in enumerate(lines_before):
+        if 'scale_dtype' in line.lower():
+            print(f"[FOUND] Linha {i+1}: {line}")
+
+# Escreve de volta
+config_file.write_text(content)
+print("\n[OK] Arquivo atualizado!")
+
+# Verifica as linhas relevantes DEPOIS do patch
+lines_after = content.split('\n')
+print("\n[AFTER] Linhas 55-90 DEPOIS do patch:")
+for i in range(54, min(90, len(lines_after))):
+    print(f"{i+1:3d}| {lines_after[i]}")
+EOF
+
+# 3. Remove TODOS os caches Python
+RUN find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib -name "*.pyc" -delete 2>/dev/null || true && \
+    find /root -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# 4. Teste de verificacao COM DETALHES
+RUN python3 << 'EOF'
+print("\n[TEST] Iniciando teste de validacao...")
+
+try:
+    print("[TEST] Importando AphroditeConfig...")
+    from aphrodite.config import AphroditeConfig
+    print("[OK] Import bem-sucedido")
+    
+    # Verifica a configuracao do Pydantic
+    if hasattr(AphroditeConfig, '__pydantic_config__'):
+        config = AphroditeConfig.__pydantic_config__
+        print(f"[INFO] Pydantic config.extra = {getattr(config, 'extra', 'NAO DEFINIDO')}")
+    
+    # Verifica os campos
+    import dataclasses
+    if dataclasses.is_dataclass(AphroditeConfig):
+        fields = dataclasses.fields(AphroditeConfig)
+        has_scale = any(f.name == 'scale_dtype' for f in fields)
+        has_zp = any(f.name == 'zp_dtype' for f in fields)
+        print(f"[INFO] Campo scale_dtype existe: {has_scale}")
+        print(f"[INFO] Campo zp_dtype existe: {has_zp}")
+    
+    print("\n[TEST] Tentando criar instancia com scale_dtype e zp_dtype...")
+    config = AphroditeConfig(
+        scale_dtype=None,
+        zp_dtype=None,
+    )
+    print("[SUCCESS] AphroditeConfig aceita scale_dtype e zp_dtype!")
+    
+except Exception as e:
+    print(f"\n[ERROR] Falhou: {e}")
+    print(f"[ERROR] Tipo do erro: {type(e).__name__}")
+    import traceback
+    print("\n[TRACEBACK]")
+    traceback.print_exc()
+    
+    # Tenta mostrar mais informacoes
+    try:
+        from aphrodite.config import AphroditeConfig
+        import inspect
+        print(f"\n[DEBUG] Arquivo fonte: {inspect.getfile(AphroditeConfig)}")
+    except:
+        pass
+    
+    raise
+EOF
+
+# 5. Instala os Kernels
+RUN uv pip install --system --extra-index-url https://downloads.pygmalion.chat/whl \
+    aphrodite-kernels==0.0.1
+
+# 6. Garante versoes do Transformers e Numba
+RUN uv pip install --system --upgrade git+https://github.com/huggingface/transformers.git && \
+    uv pip install --system --force-reinstall transformers==4.56.0 numba==0.61.2
+
+# 7. Limpeza final
+RUN find /usr/local/lib -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true && \
+    find /usr/local/lib -name "*.pyc" -delete 2>/dev/null || true
+
+EXPOSE 8000
